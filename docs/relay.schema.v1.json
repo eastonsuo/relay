@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/eastonsuo/relay/blob/main/docs/relay.schema.v1.json",
+  "title": "Relay document schema v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "documentID",
+    "applicationVersion",
+    "createdAt",
+    "updatedAt",
+    "contexts",
+    "usage",
+    "extensions"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "documentID": { "$ref": "#/$defs/uuid" },
+    "applicationVersion": { "type": "string", "minLength": 1 },
+    "createdAt": { "$ref": "#/$defs/dateTime" },
+    "updatedAt": { "$ref": "#/$defs/dateTime" },
+    "activeContextID": {
+      "oneOf": [
+        { "$ref": "#/$defs/uuid" },
+        { "type": "null" }
+      ]
+    },
+    "contexts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/context" }
+    },
+    "usage": { "$ref": "#/$defs/usage" },
+    "extensions": { "$ref": "#/$defs/extensions" },
+    "migratedFrom": { "type": "string" }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "dateTime": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "extensions": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "appReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bundleIdentifier", "name", "path"],
+      "properties": {
+        "bundleIdentifier": { "type": "string" },
+        "name": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 }
+      }
+    },
+    "detail": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "text", "createdAt", "extensions"],
+      "properties": {
+        "id": { "$ref": "#/$defs/uuid" },
+        "text": { "type": "string" },
+        "createdAt": { "$ref": "#/$defs/dateTime" },
+        "extensions": { "$ref": "#/$defs/extensions" }
+      }
+    },
+    "workspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["applications", "note", "extensions"],
+      "properties": {
+        "applications": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/appReference" }
+        },
+        "note": { "type": "string" },
+        "extensions": { "$ref": "#/$defs/extensions" }
+      }
+    },
+    "context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "focus",
+        "details",
+        "workspace",
+        "createdAt",
+        "updatedAt",
+        "extensions"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/uuid" },
+        "focus": { "type": "string" },
+        "details": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/detail" }
+        },
+        "workspace": { "$ref": "#/$defs/workspace" },
+        "archivedAt": { "$ref": "#/$defs/dateTime" },
+        "createdAt": { "$ref": "#/$defs/dateTime" },
+        "updatedAt": { "$ref": "#/$defs/dateTime" },
+        "extensions": { "$ref": "#/$defs/extensions" }
+      }
+    },
+    "trackedApplication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bundleIdentifier",
+        "name",
+        "path",
+        "switchCount",
+        "lastActivated"
+      ],
+      "properties": {
+        "bundleIdentifier": { "type": "string" },
+        "name": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 },
+        "switchCount": { "type": "integer", "minimum": 0 },
+        "lastActivated": { "$ref": "#/$defs/dateTime" }
+      }
+    },
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["applications"],
+      "properties": {
+        "applications": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/trackedApplication" }
+        }
+      }
+    }
+  }
+}

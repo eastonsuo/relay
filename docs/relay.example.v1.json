@@ -1,0 +1,54 @@
+{
+  "activeContextID": "887D4E4E-B065-42E9-9079-E1A38B11AA02",
+  "applicationVersion": "0.3.0",
+  "contexts": [
+    {
+      "createdAt": "2026-07-13T08:00:00Z",
+      "details": [
+        {
+          "createdAt": "2026-07-13T08:00:00Z",
+          "extensions": {},
+          "id": "1E1E94E2-2E61-4B6B-914B-E1A38B11AA03",
+          "text": "完成可升级 JSON 数据协议"
+        },
+        {
+          "createdAt": "2026-07-13T08:01:00Z",
+          "extensions": {},
+          "id": "8E6610F2-C9B0-4023-A17A-E1A38B11AA04",
+          "text": "验证旧数据迁移"
+        }
+      ],
+      "extensions": {},
+      "focus": "开发 Relay v0.3.0",
+      "id": "887D4E4E-B065-42E9-9079-E1A38B11AA02",
+      "updatedAt": "2026-07-13T08:05:00Z",
+      "workspace": {
+        "applications": [
+          {
+            "bundleIdentifier": "com.apple.Terminal",
+            "name": "Terminal",
+            "path": "/System/Applications/Utilities/Terminal.app"
+          }
+        ],
+        "extensions": {},
+        "note": "项目目录：~/Downloads/projects_cc/relay"
+      }
+    }
+  ],
+  "createdAt": "2026-07-13T08:00:00Z",
+  "documentID": "A73E827E-7E69-49E5-8533-E1A38B11AA01",
+  "extensions": {},
+  "schemaVersion": 1,
+  "updatedAt": "2026-07-13T08:05:00Z",
+  "usage": {
+    "applications": [
+      {
+        "bundleIdentifier": "com.apple.Terminal",
+        "lastActivated": "2026-07-13T08:04:00Z",
+        "name": "Terminal",
+        "path": "/System/Applications/Utilities/Terminal.app",
+        "switchCount": 12
+      }
+    ]
+  }
+}

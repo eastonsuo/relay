@@ -1,32 +1,42 @@
 import AppKit
 import SwiftUI
 
-enum ContextStatus: String, Codable, CaseIterable, Identifiable {
-    case active = "正在执行"
-    case waiting = "等待中"
-    case blocked = "已阻塞"
-    case ready = "可恢复"
-    case done = "已完成"
+enum JSONValue: Codable, Equatable {
+    case string(String)
+    case number(Double)
+    case bool(Bool)
+    case object([String: JSONValue])
+    case array([JSONValue])
+    case null
 
-    var id: String { rawValue }
-
-    var symbol: String {
-        switch self {
-        case .active: return "play.fill"
-        case .waiting: return "clock.fill"
-        case .blocked: return "exclamationmark.triangle.fill"
-        case .ready: return "arrow.clockwise"
-        case .done: return "checkmark.circle.fill"
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if container.decodeNil() {
+            self = .null
+        } else if let value = try? container.decode(Bool.self) {
+            self = .bool(value)
+        } else if let value = try? container.decode(Double.self) {
+            self = .number(value)
+        } else if let value = try? container.decode(String.self) {
+            self = .string(value)
+        } else if let value = try? container.decode([JSONValue].self) {
+            self = .array(value)
+        } else if let value = try? container.decode([String: JSONValue].self) {
+            self = .object(value)
+        } else {
+            throw DecodingError.dataCorruptedError(in: container, debugDescription: "Unsupported JSON value")
         }
     }
 
-    var color: Color {
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
         switch self {
-        case .active: return .green
-        case .waiting: return .orange
-        case .blocked: return .red
-        case .ready: return .blue
-        case .done: return .secondary
+        case .string(let value): try container.encode(value)
+        case .number(let value): try container.encode(value)
+        case .bool(let value): try container.encode(value)
+        case .object(let value): try container.encode(value)
+        case .array(let value): try container.encode(value)
+        case .null: try container.encodeNil()
         }
     }
 }
@@ -36,6 +46,33 @@ struct AppReference: Identifiable, Codable, Equatable, Hashable {
     var bundleIdentifier: String
     var name: String
     var path: String
+}
+
+struct WorkspaceContext: Codable, Equatable {
+    var applications: [AppReference]
+    var note: String
+    var extensions: [String: JSONValue]
+
+    init(
+        applications: [AppReference] = [],
+        note: String = "",
+        extensions: [String: JSONValue] = [:]
+    ) {
+        self.applications = applications
+        self.note = note
+        self.extensions = extensions
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case applications, note, extensions
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        applications = try container.decodeIfPresent([AppReference].self, forKey: .applications) ?? []
+        note = try container.decodeIfPresent(String.self, forKey: .note) ?? ""
+        extensions = try container.decodeIfPresent([String: JSONValue].self, forKey: .extensions) ?? [:]
+    }
 }
 
 struct TrackedApp: Identifiable, Codable, Equatable {
@@ -55,11 +92,9 @@ struct TrackedApp: Identifiable, Codable, Equatable {
 final class ApplicationUsageStore: NSObject, ObservableObject {
     @Published private(set) var apps: [TrackedApp] = []
 
-    private let storageKey = "relay.appUsage.v1"
-
     override init() {
         super.init()
-        load()
+        apps = RelayPersistence.shared.document.usage.applications
         seedInstalledApplications()
         seedRunningApplications()
         NSWorkspace.shared.notificationCenter.addObserver(
@@ -88,22 +123,6 @@ final class ApplicationUsageStore: NSObject, ObservableObject {
 
     var allSuggestions: [TrackedApp] {
         apps.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-    }
-
-    func activate(_ app: AppReference) {
-        if let runningApp = NSWorkspace.shared.runningApplications.first(where: {
-            $0.bundleIdentifier == app.bundleIdentifier
-        }) {
-            runningApp.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
-            return
-        }
-
-        let url = URL(fileURLWithPath: app.path)
-        guard FileManager.default.fileExists(atPath: url.path) else { return }
-        NSWorkspace.shared.openApplication(
-            at: url,
-            configuration: NSWorkspace.OpenConfiguration()
-        ) { _, _ in }
     }
 
     @objc private func applicationDidActivate(_ notification: Notification) {
@@ -185,64 +204,292 @@ final class ApplicationUsageStore: NSObject, ObservableObject {
         }
     }
 
-    private func load() {
-        guard let data = UserDefaults.standard.data(forKey: storageKey),
-              let decoded = try? JSONDecoder().decode([TrackedApp].self, from: data) else {
-            return
-        }
-        apps = decoded
-    }
-
     private func persist() {
-        guard let data = try? JSONEncoder().encode(apps) else { return }
-        UserDefaults.standard.set(data, forKey: storageKey)
+        RelayPersistence.shared.saveApplicationUsage(apps)
+    }
+}
+
+struct DetailItem: Identifiable, Codable, Equatable {
+    var id: UUID
+    var text: String
+    var createdAt: Date
+    var extensions: [String: JSONValue]
+
+    init(
+        id: UUID = UUID(),
+        text: String = "",
+        createdAt: Date = Date(),
+        extensions: [String: JSONValue] = [:]
+    ) {
+        self.id = id
+        self.text = text
+        self.createdAt = createdAt
+        self.extensions = extensions
     }
 }
 
 struct WorkContext: Identifiable, Codable, Equatable {
     var id: UUID
-    var title: String
-    var content: String
-    var address: String
-    var apps: [AppReference]
-    var status: ContextStatus
-    var archived: Bool
+    var focus: String
+    var details: [DetailItem]
+    var workspace: WorkspaceContext
+    var archivedAt: Date?
+    var createdAt: Date
     var updatedAt: Date
+    var extensions: [String: JSONValue]
+
+    var isArchived: Bool { archivedAt != nil }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, content, address, apps, status, archived, updatedAt
+        case id, focus, details, workspace, archivedAt, createdAt, updatedAt, extensions
+        case title, content
+        case status, archived
+        case address, apps
     }
 
     init(
         id: UUID = UUID(),
-        title: String,
-        content: String = "",
-        address: String = "",
-        apps: [AppReference] = [],
-        status: ContextStatus,
-        archived: Bool = false,
-        updatedAt: Date = Date()
+        focus: String,
+        details: [DetailItem] = [],
+        workspace: WorkspaceContext = WorkspaceContext(),
+        archivedAt: Date? = nil,
+        createdAt: Date = Date(),
+        updatedAt: Date = Date(),
+        extensions: [String: JSONValue] = [:]
     ) {
         self.id = id
-        self.title = title
-        self.content = content
-        self.address = address
-        self.apps = apps
-        self.status = status
-        self.archived = archived
+        self.focus = focus
+        self.details = details
+        self.workspace = workspace
+        self.archivedAt = archivedAt
+        self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.extensions = extensions
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(UUID.self, forKey: .id)
-        title = try container.decode(String.self, forKey: .title)
-        content = try container.decodeIfPresent(String.self, forKey: .content) ?? ""
-        address = try container.decodeIfPresent(String.self, forKey: .address) ?? ""
-        apps = try container.decodeIfPresent([AppReference].self, forKey: .apps) ?? []
-        status = try container.decodeIfPresent(ContextStatus.self, forKey: .status) ?? .ready
-        archived = try container.decodeIfPresent(Bool.self, forKey: .archived) ?? false
+        focus = try container.decodeIfPresent(String.self, forKey: .focus)
+            ?? container.decodeIfPresent(String.self, forKey: .title)
+            ?? ""
         updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
+        createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? updatedAt
+        if let decodedDetails = try container.decodeIfPresent([DetailItem].self, forKey: .details) {
+            details = decodedDetails
+        } else if let legacyContent = try container.decodeIfPresent(String.self, forKey: .content),
+                  !legacyContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            details = [DetailItem(text: legacyContent, createdAt: createdAt)]
+        } else {
+            details = []
+        }
+        if let decodedWorkspace = try container.decodeIfPresent(WorkspaceContext.self, forKey: .workspace) {
+            workspace = decodedWorkspace
+        } else {
+            workspace = WorkspaceContext(
+                applications: try container.decodeIfPresent([AppReference].self, forKey: .apps) ?? [],
+                note: try container.decodeIfPresent(String.self, forKey: .address) ?? ""
+            )
+        }
+        archivedAt = try container.decodeIfPresent(Date.self, forKey: .archivedAt)
+        if archivedAt == nil, try container.decodeIfPresent(Bool.self, forKey: .archived) == true {
+            archivedAt = updatedAt
+        }
+        extensions = try container.decodeIfPresent([String: JSONValue].self, forKey: .extensions) ?? [:]
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(focus, forKey: .focus)
+        try container.encode(details, forKey: .details)
+        try container.encode(workspace, forKey: .workspace)
+        try container.encodeIfPresent(archivedAt, forKey: .archivedAt)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(updatedAt, forKey: .updatedAt)
+        try container.encode(extensions, forKey: .extensions)
+    }
+}
+
+struct UsageData: Codable, Equatable {
+    var applications: [TrackedApp]
+
+    init(applications: [TrackedApp] = []) {
+        self.applications = applications
+    }
+}
+
+struct RelayDocument: Codable, Equatable {
+    var schemaVersion: Int
+    var documentID: UUID
+    var applicationVersion: String
+    var createdAt: Date
+    var updatedAt: Date
+    var activeContextID: UUID?
+    var contexts: [WorkContext]
+    var usage: UsageData
+    var extensions: [String: JSONValue]
+    var migratedFrom: String?
+}
+
+private struct LegacyContextSnapshot: Codable {
+    var contexts: [WorkContext]
+    var activeContextID: UUID?
+}
+
+@MainActor
+final class RelayPersistence {
+    static let shared = RelayPersistence()
+    static let currentSchemaVersion = 1
+
+    private(set) var document: RelayDocument
+    let fileURL: URL
+    private var canWrite = true
+    private var pendingWrite: DispatchWorkItem?
+
+    private init() {
+        let fileManager = FileManager.default
+        let applicationSupport = (try? fileManager.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        )) ?? fileManager.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support")
+        let directory = applicationSupport.appendingPathComponent("Relay", isDirectory: true)
+        try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        fileURL = directory.appendingPathComponent("relay.json")
+
+        if fileManager.fileExists(atPath: fileURL.path) {
+            if let data = try? Data(contentsOf: fileURL),
+               let version = Self.schemaVersion(in: data),
+               version == Self.currentSchemaVersion,
+               let decoded = try? Self.decoder.decode(RelayDocument.self, from: data) {
+                document = decoded
+            } else {
+                document = Self.emptyDocument()
+                canWrite = false
+                NSLog("Relay data file is invalid or uses an unsupported schema; file left untouched")
+            }
+        } else if let migrated = Self.migrateLegacyUserDefaults() {
+            document = migrated
+        } else {
+            document = Self.emptyDocument()
+        }
+
+        if canWrite {
+            writeDocument()
+        }
+    }
+
+    func saveContexts(_ contexts: [WorkContext], activeContextID: UUID?) {
+        guard canWrite else { return }
+        document.contexts = contexts
+        document.activeContextID = activeContextID
+        scheduleWrite()
+    }
+
+    func saveApplicationUsage(_ applications: [TrackedApp]) {
+        guard canWrite else { return }
+        document.usage.applications = applications
+        scheduleWrite()
+    }
+
+    func flush() {
+        guard canWrite else { return }
+        pendingWrite?.cancel()
+        pendingWrite = nil
+        writeDocument()
+    }
+
+    private func scheduleWrite() {
+        pendingWrite?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.pendingWrite = nil
+            self.writeDocument()
+        }
+        pendingWrite = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: workItem)
+    }
+
+    private func writeDocument() {
+        document.schemaVersion = Self.currentSchemaVersion
+        document.applicationVersion = Self.applicationVersion
+        document.updatedAt = Date()
+
+        do {
+            let data = try Self.encoder.encode(document)
+            try data.write(to: fileURL, options: .atomic)
+        } catch {
+            NSLog("Relay could not save %@: %@", fileURL.path, error.localizedDescription)
+        }
+    }
+
+    private static var applicationVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development"
+    }
+
+    private static let encoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        encoder.dateEncodingStrategy = .iso8601
+        return encoder
+    }()
+
+    private static let decoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }()
+
+    private static func schemaVersion(in data: Data) -> Int? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return object["schemaVersion"] as? Int
+    }
+
+    private static func emptyDocument() -> RelayDocument {
+        let now = Date()
+        return RelayDocument(
+            schemaVersion: currentSchemaVersion,
+            documentID: UUID(),
+            applicationVersion: applicationVersion,
+            createdAt: now,
+            updatedAt: now,
+            activeContextID: nil,
+            contexts: [],
+            usage: UsageData(),
+            extensions: [:],
+            migratedFrom: nil
+        )
+    }
+
+    private static func migrateLegacyUserDefaults() -> RelayDocument? {
+        let defaults = UserDefaults.standard
+        let legacyContextData = defaults.data(forKey: "relay.contexts.v1")
+        let legacyUsageData = defaults.data(forKey: "relay.appUsage.v1")
+        guard legacyContextData != nil || legacyUsageData != nil else { return nil }
+
+        let legacyDecoder = JSONDecoder()
+        let snapshot = legacyContextData.flatMap {
+            try? legacyDecoder.decode(LegacyContextSnapshot.self, from: $0)
+        }
+        let applications = legacyUsageData.flatMap {
+            try? legacyDecoder.decode([TrackedApp].self, from: $0)
+        } ?? []
+        let now = Date()
+
+        return RelayDocument(
+            schemaVersion: currentSchemaVersion,
+            documentID: UUID(),
+            applicationVersion: applicationVersion,
+            createdAt: now,
+            updatedAt: now,
+            activeContextID: snapshot?.activeContextID,
+            contexts: snapshot?.contexts ?? [],
+            usage: UsageData(applications: applications),
+            extensions: [:],
+            migratedFrom: "userDefaults-v1"
+        )
     }
 }
 
@@ -256,12 +503,6 @@ final class ContextStore: ObservableObject {
         didSet { persist() }
     }
 
-    private struct Snapshot: Codable {
-        var contexts: [WorkContext]
-        var activeContextID: UUID?
-    }
-
-    private let storageKey = "relay.contexts.v1"
     private var isLoading = true
 
     init() {
@@ -275,19 +516,17 @@ final class ContextStore: ObservableObject {
     }
 
     var unarchivedContexts: [WorkContext] {
-        contexts.filter { !$0.archived }
+        contexts.filter { !$0.isArchived }
     }
 
     var archivedContexts: [WorkContext] {
-        contexts.filter(\.archived)
+        contexts.filter(\.isArchived)
     }
 
     func addContext() {
         var context = WorkContext(
-            title: "新的目标",
-            content: "",
-            address: "",
-            status: contexts.isEmpty ? .active : .ready
+            focus: "新的上下文",
+            details: [DetailItem()]
         )
         context.updatedAt = Date()
         contexts.insert(context, at: 0)
@@ -298,39 +537,28 @@ final class ContextStore: ObservableObject {
         let deletingActiveContext = activeContextID == id
         contexts.removeAll { $0.id == id }
         if deletingActiveContext {
-            activeContextID = contexts.first { !$0.archived }?.id
+            activeContextID = contexts.first { !$0.isArchived }?.id
         }
     }
 
     func archive(_ id: UUID) {
         guard let index = contexts.firstIndex(where: { $0.id == id }) else { return }
-        contexts[index].archived = true
+        contexts[index].archivedAt = Date()
         contexts[index].updatedAt = Date()
         if activeContextID == id {
-            activeContextID = contexts.first { !$0.archived }?.id
+            activeContextID = contexts.first { !$0.isArchived }?.id
         }
     }
 
     func restore(_ id: UUID) {
         guard let index = contexts.firstIndex(where: { $0.id == id }) else { return }
-        contexts[index].archived = false
+        contexts[index].archivedAt = nil
         contexts[index].updatedAt = Date()
         activate(id)
     }
 
     func activate(_ id: UUID) {
-        guard let targetIndex = contexts.firstIndex(where: { $0.id == id }) else { return }
-
-        if let activeContextID,
-           activeContextID != id,
-           let previousIndex = contexts.firstIndex(where: { $0.id == activeContextID }),
-           contexts[previousIndex].status == .active {
-            contexts[previousIndex].status = .ready
-            contexts[previousIndex].updatedAt = Date()
-        }
-
-        contexts[targetIndex].status = .active
-        contexts[targetIndex].updatedAt = Date()
+        guard contexts.contains(where: { $0.id == id && !$0.isArchived }) else { return }
         activeContextID = id
     }
 
@@ -343,12 +571,41 @@ final class ContextStore: ObservableObject {
 
     func toggleApp(_ app: AppReference, for id: UUID) {
         update(id) { context in
-            if let index = context.apps.firstIndex(where: { $0.id == app.id }) {
-                context.apps.remove(at: index)
+            if let index = context.workspace.applications.firstIndex(where: { $0.id == app.id }) {
+                context.workspace.applications.remove(at: index)
             } else {
-                context.apps.append(app)
+                context.workspace.applications.append(app)
             }
         }
+    }
+
+    func addDetail(to id: UUID) {
+        update(id) { context in
+            context.details.append(DetailItem())
+        }
+    }
+
+    func removeDetail(_ detailID: UUID, from id: UUID) {
+        update(id) { context in
+            context.details.removeAll { $0.id == detailID }
+        }
+    }
+
+    func detailBinding(for id: UUID, detailID: UUID) -> Binding<String> {
+        Binding(
+            get: { [weak self] in
+                self?.contexts
+                    .first(where: { $0.id == id })?
+                    .details.first(where: { $0.id == detailID })?
+                    .text ?? ""
+            },
+            set: { [weak self] value in
+                self?.update(id) { context in
+                    guard let index = context.details.firstIndex(where: { $0.id == detailID }) else { return }
+                    context.details[index].text = value
+                }
+            }
+        )
     }
 
     func binding<T>(for id: UUID, keyPath: WritableKeyPath<WorkContext, T>, fallback: T) -> Binding<T> {
@@ -363,28 +620,30 @@ final class ContextStore: ObservableObject {
     }
 
     private func load() {
-        guard let data = UserDefaults.standard.data(forKey: storageKey),
-              let snapshot = try? JSONDecoder().decode(Snapshot.self, from: data) else {
+        let document = RelayPersistence.shared.document
+        guard !document.contexts.isEmpty else {
             let first = WorkContext(
-                title: "创建我的第一个上下文",
-                content: "记录并切换正在并行推进的目标",
-                address: "Relay",
-                status: .active
+                focus: "创建我的第一个上下文",
+                details: [DetailItem(text: "记录并切换正在并行推进的目标")],
+                workspace: WorkspaceContext(note: "Relay")
             )
             contexts = [first]
             activeContextID = first.id
             return
         }
 
-        contexts = snapshot.contexts
-        activeContextID = snapshot.activeContextID
+        contexts = document.contexts
+        if let savedID = document.activeContextID,
+           contexts.contains(where: { $0.id == savedID && !$0.isArchived }) {
+            activeContextID = savedID
+        } else {
+            activeContextID = contexts.first { !$0.isArchived }?.id
+        }
     }
 
     private func persist() {
         guard !isLoading else { return }
-        let snapshot = Snapshot(contexts: contexts, activeContextID: activeContextID)
-        guard let data = try? JSONEncoder().encode(snapshot) else { return }
-        UserDefaults.standard.set(data, forKey: storageKey)
+        RelayPersistence.shared.saveContexts(contexts, activeContextID: activeContextID)
     }
 }
 
@@ -397,6 +656,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        RelayPersistence.shared.flush()
     }
 
     private func configureMainWindow(attempt: Int = 0) {
@@ -416,19 +679,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-    }
-}
-
-struct StatusBadge: View {
-    let status: ContextStatus
-
-    var body: some View {
-        Label(status.rawValue, systemImage: status.symbol)
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(status.color)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 4)
-            .background(status.color.opacity(0.12), in: Capsule())
     }
 }
 
@@ -492,6 +742,68 @@ struct LabeledField: View {
     }
 }
 
+struct ApplicationPill: View {
+    let app: AppReference
+    let selected: Bool
+    let action: () -> Void
+
+    private var foregroundColor: Color {
+        selected ? .green : .secondary
+    }
+
+    private var fillColor: Color {
+        selected ? Color.green.opacity(0.16) : Color.secondary.opacity(0.08)
+    }
+
+    private var borderColor: Color {
+        selected ? Color.green.opacity(0.55) : Color.secondary.opacity(0.18)
+    }
+
+    var body: some View {
+        Button(action: action) {
+            Text(app.name)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(foregroundColor)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(Capsule().fill(fillColor))
+                .overlay {
+                    Capsule().stroke(borderColor, lineWidth: 1)
+                }
+            }
+            .buttonStyle(.plain)
+            .help(selected ? "取消关联 \(app.name)" : "关联 \(app.name)")
+    }
+}
+
+struct ApplicationPickerMenu: View {
+    @ObservedObject var store: ContextStore
+    @ObservedObject var usageStore: ApplicationUsageStore
+    let contextID: UUID
+    let selectedIDs: Set<String>
+
+    var body: some View {
+        Menu {
+            ForEach(usageStore.allSuggestions) { app in
+                Button {
+                    store.toggleApp(app.reference, for: contextID)
+                } label: {
+                    Text(selectedIDs.contains(app.id) ? "✓ \(app.name)" : app.name)
+                }
+            }
+        } label: {
+            Text("+ APP")
+                .font(.caption.weight(.medium))
+                .padding(.horizontal, 9)
+                .padding(.vertical, 5)
+                .background(Color.secondary.opacity(0.08), in: Capsule())
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("从已安装软件中多选")
+    }
+}
+
 struct AddressSelector: View {
     @ObservedObject var store: ContextStore
     @ObservedObject var usageStore: ApplicationUsageStore
@@ -501,84 +813,46 @@ struct AddressSelector: View {
         store.contexts.first { $0.id == contextID }
     }
 
+    private func isSelected(_ app: AppReference, in context: WorkContext) -> Bool {
+        context.workspace.applications.contains { $0.id == app.id }
+    }
+
+    private func visibleApplications(for context: WorkContext) -> [AppReference] {
+        var result = context.workspace.applications
+        for app in usageStore.frequentSuggestions.prefix(8).map(\.reference)
+            where !result.contains(where: { $0.id == app.id }) {
+            result.append(app)
+        }
+        return Array(result.prefix(10))
+    }
+
     var body: some View {
         if let context {
             VStack(alignment: .leading, spacing: 6) {
-                Text("地址")
+                Text("关联 APP")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
 
-                HStack(spacing: 6) {
-                    if !context.apps.isEmpty {
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            HStack(spacing: 5) {
-                                ForEach(context.apps) { app in
-                                    HStack(spacing: 3) {
-                                        Button(app.name) {
-                                            usageStore.activate(app)
-                                        }
-                                        .buttonStyle(.plain)
-                                        .help("打开 \(app.name)")
-
-                                        Button {
-                                            store.toggleApp(app, for: contextID)
-                                        } label: {
-                                            Image(systemName: "xmark")
-                                                .font(.caption2)
-                                        }
-                                        .buttonStyle(.plain)
-                                        .foregroundStyle(.secondary)
-                                        .help("从这个目标移除")
-                                    }
-                                    .font(.caption.weight(.medium))
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 5)
-                                    .background(Color.accentColor.opacity(0.1), in: Capsule())
-                                }
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 5) {
+                        ForEach(visibleApplications(for: context)) { app in
+                            ApplicationPill(app: app, selected: isSelected(app, in: context)) {
+                                store.toggleApp(app, for: contextID)
                             }
                         }
+
+                        ApplicationPickerMenu(
+                            store: store,
+                            usageStore: usageStore,
+                            contextID: contextID,
+                            selectedIDs: Set(context.workspace.applications.map(\.id))
+                        )
                     }
-
-                    Menu {
-                        if usageStore.frequentSuggestions.isEmpty {
-                            Text("切换软件后，常用项会出现在这里")
-                        } else {
-                            Section("最近 / 常用") {
-                                ForEach(Array(usageStore.frequentSuggestions.prefix(8))) { app in
-                                    let selected = context.apps.contains { $0.id == app.id }
-                                    Button {
-                                        store.toggleApp(app.reference, for: contextID)
-                                    } label: {
-                                        Text(selected ? "✓ \(app.name)" : app.name)
-                                    }
-                                }
-                            }
-                        }
-
-                        Divider()
-
-                        Menu("全部软件") {
-                            ForEach(usageStore.allSuggestions) { app in
-                                let selected = context.apps.contains { $0.id == app.id }
-                                Button {
-                                    store.toggleApp(app.reference, for: contextID)
-                                } label: {
-                                    Text(selected ? "✓ \(app.name)" : app.name)
-                                }
-                            }
-                        }
-                    } label: {
-                        Text(context.apps.isEmpty ? "选择软件" : "+ 软件")
-                            .font(.caption.weight(.medium))
-                    }
-                    .menuStyle(.borderlessButton)
-                    .fixedSize()
-                    .help("从最近和最常切换的软件中多选")
                 }
 
                 TextField(
-                    "补充目录或网址（可选）",
-                    text: store.binding(for: contextID, keyPath: \.address, fallback: "")
+                    "补充备注（可选）",
+                    text: store.binding(for: contextID, keyPath: \.workspace.note, fallback: "")
                 )
                 .textFieldStyle(.plain)
                 .font(.callout)
@@ -616,9 +890,9 @@ struct ContextTab: View {
             } label: {
                 HStack(spacing: 7) {
                     Circle()
-                        .fill(context.status.color)
+                        .fill(isActive ? Color.green : Color.secondary.opacity(0.45))
                         .frame(width: 7, height: 7)
-                    Text(context.title.isEmpty ? "未命名目标" : context.title)
+                    Text(context.focus.isEmpty ? "未命名上下文" : context.focus)
                         .font(.subheadline.weight(isActive ? .semibold : .regular))
                         .lineLimit(1)
                 }
@@ -647,13 +921,13 @@ struct ContextTab: View {
                     Label("删除", systemImage: "trash")
                 }
             }
-            .confirmationDialog("删除“\(context.title)”？", isPresented: $showingDeleteConfirmation) {
+            .confirmationDialog("删除“\(context.focus)”？", isPresented: $showingDeleteConfirmation) {
                 Button("删除", role: .destructive) {
                     store.delete(contextID)
                 }
                 Button("取消", role: .cancel) {}
             } message: {
-                Text("这个目标保存的内容和地址也会被删除。")
+                Text("这个上下文的具体展开和关联 APP 也会被删除。")
             }
         }
     }
@@ -673,36 +947,57 @@ struct ContextPage: View {
         if let context {
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
-                    HStack(alignment: .bottom, spacing: 12) {
-                        LabeledField(
-                            label: "标题",
-                            placeholder: "这个目标叫什么",
-                            text: store.binding(for: contextID, keyPath: \.title, fallback: "")
-                        )
-
-                        StatusBadge(status: context.status)
-                            .padding(.bottom, 4)
-                    }
-
-                    LabeledEditor(
-                        label: "内容",
-                        placeholder: "我要做什么",
-                        text: store.binding(for: contextID, keyPath: \.content, fallback: "")
+                    LabeledField(
+                        label: "我在做什么",
+                        placeholder: "一句话记住当前上下文",
+                        text: store.binding(for: contextID, keyPath: \.focus, fallback: "")
                     )
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("具体展开")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+
+                        ForEach(context.details) { detail in
+                            HStack(spacing: 6) {
+                                TextField(
+                                    "下一步、线索或待处理事项",
+                                    text: store.detailBinding(for: contextID, detailID: detail.id)
+                                )
+                                .textFieldStyle(.plain)
+                                .font(.callout)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 7)
+                                .background(.background.opacity(0.7), in: RoundedRectangle(cornerRadius: 8))
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .stroke(.separator.opacity(0.5), lineWidth: 1)
+                                }
+
+                                Button {
+                                    store.removeDetail(detail.id, from: contextID)
+                                } label: {
+                                    Image(systemName: "minus.circle")
+                                }
+                                .buttonStyle(.plain)
+                                .foregroundStyle(.secondary)
+                                .help("删除这一项")
+                            }
+                        }
+
+                        Button {
+                            store.addDetail(to: contextID)
+                        } label: {
+                            Label("添加一项", systemImage: "plus")
+                                .font(.caption.weight(.medium))
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.tint)
+                    }
 
                     AddressSelector(store: store, usageStore: usageStore, contextID: contextID)
 
                     HStack {
-                        Picker(
-                            "状态",
-                            selection: store.binding(for: contextID, keyPath: \.status, fallback: .ready)
-                        ) {
-                            ForEach(ContextStatus.allCases) { status in
-                                Label(status.rawValue, systemImage: status.symbol).tag(status)
-                            }
-                        }
-                        .frame(maxWidth: 190)
-
                         Text("更新于 \(context.updatedAt.formatted(date: .omitted, time: .shortened))")
                             .font(.caption)
                             .foregroundStyle(.tertiary)
@@ -719,13 +1014,13 @@ struct ContextPage: View {
                 }
                 .padding(14)
             }
-            .confirmationDialog("删除“\(context.title)”？", isPresented: $showingDeleteConfirmation) {
+            .confirmationDialog("删除“\(context.focus)”？", isPresented: $showingDeleteConfirmation) {
                 Button("删除", role: .destructive) {
                     store.delete(contextID)
                 }
                 Button("取消", role: .cancel) {}
             } message: {
-                Text("这个目标保存的内容和地址也会被删除。")
+                Text("这个上下文的具体展开和关联 APP 也会被删除。")
             }
         }
     }
@@ -737,11 +1032,7 @@ struct ContentView: View {
     @State private var isCollapsed = false
 
     private var activeCount: Int {
-        store.unarchivedContexts.filter { $0.status != .done }.count
-    }
-
-    private var blockedCount: Int {
-        store.unarchivedContexts.filter { $0.status == .blocked || $0.status == .waiting }.count
+        store.unarchivedContexts.count
     }
 
     var body: some View {
@@ -759,12 +1050,6 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
 
                 Spacer()
-
-                if blockedCount > 0 {
-                    Label("\(blockedCount)", systemImage: "pause.circle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                }
 
                 Label("\(activeCount)", systemImage: "square.stack.3d.up")
                     .font(.caption)
@@ -810,7 +1095,7 @@ struct ContentView: View {
                                 Button {
                                     store.restore(context.id)
                                 } label: {
-                                    Label(context.title, systemImage: "arrow.uturn.backward")
+                                    Label(context.focus, systemImage: "arrow.uturn.backward")
                                 }
                             }
                         } label: {
