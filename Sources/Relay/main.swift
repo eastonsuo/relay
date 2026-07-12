@@ -31,17 +31,186 @@ enum ContextStatus: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+struct AppReference: Identifiable, Codable, Equatable, Hashable {
+    var id: String { bundleIdentifier.isEmpty ? path : bundleIdentifier }
+    var bundleIdentifier: String
+    var name: String
+    var path: String
+}
+
+struct TrackedApp: Identifiable, Codable, Equatable {
+    var id: String { bundleIdentifier.isEmpty ? path : bundleIdentifier }
+    var bundleIdentifier: String
+    var name: String
+    var path: String
+    var switchCount: Int
+    var lastActivated: Date
+
+    var reference: AppReference {
+        AppReference(bundleIdentifier: bundleIdentifier, name: name, path: path)
+    }
+}
+
+@MainActor
+final class ApplicationUsageStore: NSObject, ObservableObject {
+    @Published private(set) var apps: [TrackedApp] = []
+
+    private let storageKey = "relay.appUsage.v1"
+
+    override init() {
+        super.init()
+        load()
+        seedInstalledApplications()
+        seedRunningApplications()
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(applicationDidActivate(_:)),
+            name: NSWorkspace.didActivateApplicationNotification,
+            object: nil
+        )
+    }
+
+    var suggestions: [TrackedApp] {
+        apps.sorted {
+            if $0.switchCount != $1.switchCount {
+                return $0.switchCount > $1.switchCount
+            }
+            if $0.lastActivated != $1.lastActivated {
+                return $0.lastActivated > $1.lastActivated
+            }
+            return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }
+    }
+
+    var frequentSuggestions: [TrackedApp] {
+        suggestions.filter { $0.switchCount > 0 }
+    }
+
+    var allSuggestions: [TrackedApp] {
+        apps.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    func activate(_ app: AppReference) {
+        if let runningApp = NSWorkspace.shared.runningApplications.first(where: {
+            $0.bundleIdentifier == app.bundleIdentifier
+        }) {
+            runningApp.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+            return
+        }
+
+        let url = URL(fileURLWithPath: app.path)
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        NSWorkspace.shared.openApplication(
+            at: url,
+            configuration: NSWorkspace.OpenConfiguration()
+        ) { _, _ in }
+    }
+
+    @objc private func applicationDidActivate(_ notification: Notification) {
+        guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else {
+            return
+        }
+        record(app, increment: true)
+    }
+
+    private func seedRunningApplications() {
+        for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
+            record(app, increment: false)
+        }
+    }
+
+    private func seedInstalledApplications() {
+        let roots = [
+            URL(fileURLWithPath: "/Applications", isDirectory: true),
+            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications", isDirectory: true)
+        ]
+
+        for root in roots {
+            guard let urls = try? FileManager.default.contentsOfDirectory(
+                at: root,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            ) else {
+                continue
+            }
+
+            for url in urls where url.pathExtension.lowercased() == "app" {
+                guard let bundle = Bundle(url: url) else { continue }
+                let bundleIdentifier = bundle.bundleIdentifier ?? url.path
+                guard bundleIdentifier != Bundle.main.bundleIdentifier else { continue }
+                let name = (bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
+                    ?? (bundle.object(forInfoDictionaryKey: "CFBundleName") as? String)
+                    ?? url.deletingPathExtension().lastPathComponent
+                register(bundleIdentifier: bundleIdentifier, name: name, path: url.path)
+            }
+        }
+
+        persist()
+    }
+
+    private func record(_ app: NSRunningApplication, increment: Bool) {
+        guard app.activationPolicy == .regular,
+              app.bundleIdentifier != Bundle.main.bundleIdentifier,
+              let name = app.localizedName,
+              let path = app.bundleURL?.path else {
+            return
+        }
+
+        let bundleIdentifier = app.bundleIdentifier ?? path
+        register(bundleIdentifier: bundleIdentifier, name: name, path: path)
+        if let index = apps.firstIndex(where: { $0.id == bundleIdentifier }) {
+            if increment {
+                apps[index].switchCount += 1
+                apps[index].lastActivated = Date()
+            }
+        }
+
+        persist()
+    }
+
+    private func register(bundleIdentifier: String, name: String, path: String) {
+        if let index = apps.firstIndex(where: { $0.id == bundleIdentifier }) {
+            apps[index].name = name
+            apps[index].path = path
+        } else {
+            apps.append(
+                TrackedApp(
+                    bundleIdentifier: bundleIdentifier,
+                    name: name,
+                    path: path,
+                    switchCount: 0,
+                    lastActivated: .distantPast
+                )
+            )
+        }
+    }
+
+    private func load() {
+        guard let data = UserDefaults.standard.data(forKey: storageKey),
+              let decoded = try? JSONDecoder().decode([TrackedApp].self, from: data) else {
+            return
+        }
+        apps = decoded
+    }
+
+    private func persist() {
+        guard let data = try? JSONEncoder().encode(apps) else { return }
+        UserDefaults.standard.set(data, forKey: storageKey)
+    }
+}
+
 struct WorkContext: Identifiable, Codable, Equatable {
     var id: UUID
     var title: String
     var content: String
     var address: String
+    var apps: [AppReference]
     var status: ContextStatus
     var archived: Bool
     var updatedAt: Date
 
     enum CodingKeys: String, CodingKey {
-        case id, title, content, address, status, archived, updatedAt
+        case id, title, content, address, apps, status, archived, updatedAt
     }
 
     init(
@@ -49,6 +218,7 @@ struct WorkContext: Identifiable, Codable, Equatable {
         title: String,
         content: String = "",
         address: String = "",
+        apps: [AppReference] = [],
         status: ContextStatus,
         archived: Bool = false,
         updatedAt: Date = Date()
@@ -57,6 +227,7 @@ struct WorkContext: Identifiable, Codable, Equatable {
         self.title = title
         self.content = content
         self.address = address
+        self.apps = apps
         self.status = status
         self.archived = archived
         self.updatedAt = updatedAt
@@ -68,6 +239,7 @@ struct WorkContext: Identifiable, Codable, Equatable {
         title = try container.decode(String.self, forKey: .title)
         content = try container.decodeIfPresent(String.self, forKey: .content) ?? ""
         address = try container.decodeIfPresent(String.self, forKey: .address) ?? ""
+        apps = try container.decodeIfPresent([AppReference].self, forKey: .apps) ?? []
         status = try container.decodeIfPresent(ContextStatus.self, forKey: .status) ?? .ready
         archived = try container.decodeIfPresent(Bool.self, forKey: .archived) ?? false
         updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
@@ -167,6 +339,16 @@ final class ContextStore: ObservableObject {
         mutation(&contexts[index])
         contexts[index].updatedAt = Date()
 
+    }
+
+    func toggleApp(_ app: AppReference, for id: UUID) {
+        update(id) { context in
+            if let index = context.apps.firstIndex(where: { $0.id == app.id }) {
+                context.apps.remove(at: index)
+            } else {
+                context.apps.append(app)
+            }
+        }
     }
 
     func binding<T>(for id: UUID, keyPath: WritableKeyPath<WorkContext, T>, fallback: T) -> Binding<T> {
@@ -310,6 +492,108 @@ struct LabeledField: View {
     }
 }
 
+struct AddressSelector: View {
+    @ObservedObject var store: ContextStore
+    @ObservedObject var usageStore: ApplicationUsageStore
+    let contextID: UUID
+
+    private var context: WorkContext? {
+        store.contexts.first { $0.id == contextID }
+    }
+
+    var body: some View {
+        if let context {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("地址")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+
+                HStack(spacing: 6) {
+                    if !context.apps.isEmpty {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 5) {
+                                ForEach(context.apps) { app in
+                                    HStack(spacing: 3) {
+                                        Button(app.name) {
+                                            usageStore.activate(app)
+                                        }
+                                        .buttonStyle(.plain)
+                                        .help("打开 \(app.name)")
+
+                                        Button {
+                                            store.toggleApp(app, for: contextID)
+                                        } label: {
+                                            Image(systemName: "xmark")
+                                                .font(.caption2)
+                                        }
+                                        .buttonStyle(.plain)
+                                        .foregroundStyle(.secondary)
+                                        .help("从这个目标移除")
+                                    }
+                                    .font(.caption.weight(.medium))
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 5)
+                                    .background(Color.accentColor.opacity(0.1), in: Capsule())
+                                }
+                            }
+                        }
+                    }
+
+                    Menu {
+                        if usageStore.frequentSuggestions.isEmpty {
+                            Text("切换软件后，常用项会出现在这里")
+                        } else {
+                            Section("最近 / 常用") {
+                                ForEach(Array(usageStore.frequentSuggestions.prefix(8))) { app in
+                                    let selected = context.apps.contains { $0.id == app.id }
+                                    Button {
+                                        store.toggleApp(app.reference, for: contextID)
+                                    } label: {
+                                        Text(selected ? "✓ \(app.name)" : app.name)
+                                    }
+                                }
+                            }
+                        }
+
+                        Divider()
+
+                        Menu("全部软件") {
+                            ForEach(usageStore.allSuggestions) { app in
+                                let selected = context.apps.contains { $0.id == app.id }
+                                Button {
+                                    store.toggleApp(app.reference, for: contextID)
+                                } label: {
+                                    Text(selected ? "✓ \(app.name)" : app.name)
+                                }
+                            }
+                        }
+                    } label: {
+                        Text(context.apps.isEmpty ? "选择软件" : "+ 软件")
+                            .font(.caption.weight(.medium))
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .help("从最近和最常切换的软件中多选")
+                }
+
+                TextField(
+                    "补充目录或网址（可选）",
+                    text: store.binding(for: contextID, keyPath: \.address, fallback: "")
+                )
+                .textFieldStyle(.plain)
+                .font(.callout)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 7)
+                .background(.background.opacity(0.7), in: RoundedRectangle(cornerRadius: 8))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(.separator.opacity(0.5), lineWidth: 1)
+                }
+            }
+        }
+    }
+}
+
 struct ContextTab: View {
     @ObservedObject var store: ContextStore
     let contextID: UUID
@@ -377,6 +661,7 @@ struct ContextTab: View {
 
 struct ContextPage: View {
     @ObservedObject var store: ContextStore
+    @ObservedObject var usageStore: ApplicationUsageStore
     let contextID: UUID
     @State private var showingDeleteConfirmation = false
 
@@ -405,11 +690,7 @@ struct ContextPage: View {
                         text: store.binding(for: contextID, keyPath: \.content, fallback: "")
                     )
 
-                    LabeledField(
-                        label: "地址",
-                        placeholder: "我在哪里做",
-                        text: store.binding(for: contextID, keyPath: \.address, fallback: "")
-                    )
+                    AddressSelector(store: store, usageStore: usageStore, contextID: contextID)
 
                     HStack {
                         Picker(
@@ -452,6 +733,7 @@ struct ContextPage: View {
 
 struct ContentView: View {
     @StateObject private var store = ContextStore()
+    @StateObject private var usageStore = ApplicationUsageStore()
     @State private var isCollapsed = false
 
     private var activeCount: Int {
@@ -566,9 +848,9 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .padding(40)
                 } else if let activeContextID = store.activeContextID {
-                    ContextPage(store: store, contextID: activeContextID)
+                    ContextPage(store: store, usageStore: usageStore, contextID: activeContextID)
                 } else if let firstContextID = store.unarchivedContexts.first?.id {
-                    ContextPage(store: store, contextID: firstContextID)
+                    ContextPage(store: store, usageStore: usageStore, contextID: firstContextID)
                 }
 
                 Divider()
