@@ -529,7 +529,7 @@ final class ContextStore: ObservableObject {
             details: [DetailItem()]
         )
         context.updatedAt = Date()
-        contexts.insert(context, at: 0)
+        contexts.append(context)
         activate(context.id)
     }
 
