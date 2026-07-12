@@ -37,10 +37,11 @@ struct WorkContext: Identifiable, Codable, Equatable {
     var content: String
     var address: String
     var status: ContextStatus
+    var archived: Bool
     var updatedAt: Date
 
     enum CodingKeys: String, CodingKey {
-        case id, title, content, address, status, updatedAt
+        case id, title, content, address, status, archived, updatedAt
     }
 
     init(
@@ -49,6 +50,7 @@ struct WorkContext: Identifiable, Codable, Equatable {
         content: String = "",
         address: String = "",
         status: ContextStatus,
+        archived: Bool = false,
         updatedAt: Date = Date()
     ) {
         self.id = id
@@ -56,6 +58,7 @@ struct WorkContext: Identifiable, Codable, Equatable {
         self.content = content
         self.address = address
         self.status = status
+        self.archived = archived
         self.updatedAt = updatedAt
     }
 
@@ -66,6 +69,7 @@ struct WorkContext: Identifiable, Codable, Equatable {
         content = try container.decodeIfPresent(String.self, forKey: .content) ?? ""
         address = try container.decodeIfPresent(String.self, forKey: .address) ?? ""
         status = try container.decodeIfPresent(ContextStatus.self, forKey: .status) ?? .ready
+        archived = try container.decodeIfPresent(Bool.self, forKey: .archived) ?? false
         updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
     }
 }
@@ -98,6 +102,14 @@ final class ContextStore: ObservableObject {
         return contexts.first { $0.id == activeContextID }
     }
 
+    var unarchivedContexts: [WorkContext] {
+        contexts.filter { !$0.archived }
+    }
+
+    var archivedContexts: [WorkContext] {
+        contexts.filter(\.archived)
+    }
+
     func addContext() {
         var context = WorkContext(
             title: "新的目标",
@@ -114,8 +126,24 @@ final class ContextStore: ObservableObject {
         let deletingActiveContext = activeContextID == id
         contexts.removeAll { $0.id == id }
         if deletingActiveContext {
-            activeContextID = contexts.first?.id
+            activeContextID = contexts.first { !$0.archived }?.id
         }
+    }
+
+    func archive(_ id: UUID) {
+        guard let index = contexts.firstIndex(where: { $0.id == id }) else { return }
+        contexts[index].archived = true
+        contexts[index].updatedAt = Date()
+        if activeContextID == id {
+            activeContextID = contexts.first { !$0.archived }?.id
+        }
+    }
+
+    func restore(_ id: UUID) {
+        guard let index = contexts.firstIndex(where: { $0.id == id }) else { return }
+        contexts[index].archived = false
+        contexts[index].updatedAt = Date()
+        activate(id)
     }
 
     func activate(_ id: UUID) {
@@ -285,6 +313,7 @@ struct LabeledField: View {
 struct ContextTab: View {
     @ObservedObject var store: ContextStore
     let contextID: UUID
+    @State private var showingDeleteConfirmation = false
 
     private var context: WorkContext? {
         store.contexts.first { $0.id == contextID }
@@ -318,6 +347,30 @@ struct ContextTab: View {
                 )
             }
             .buttonStyle(.plain)
+            .help("点击切换；右键归档或删除")
+            .contextMenu {
+                Button {
+                    store.archive(contextID)
+                } label: {
+                    Label("归档", systemImage: "archivebox")
+                }
+
+                Divider()
+
+                Button(role: .destructive) {
+                    showingDeleteConfirmation = true
+                } label: {
+                    Label("删除", systemImage: "trash")
+                }
+            }
+            .confirmationDialog("删除“\(context.title)”？", isPresented: $showingDeleteConfirmation) {
+                Button("删除", role: .destructive) {
+                    store.delete(contextID)
+                }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("这个目标保存的内容和地址也会被删除。")
+            }
         }
     }
 }
@@ -402,11 +455,11 @@ struct ContentView: View {
     @State private var isCollapsed = false
 
     private var activeCount: Int {
-        store.contexts.filter { $0.status != .done }.count
+        store.unarchivedContexts.filter { $0.status != .done }.count
     }
 
     private var blockedCount: Int {
-        store.contexts.filter { $0.status == .blocked || $0.status == .waiting }.count
+        store.unarchivedContexts.filter { $0.status == .blocked || $0.status == .waiting }.count
     }
 
     var body: some View {
@@ -454,7 +507,7 @@ struct ContentView: View {
 
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 5) {
-                    ForEach(store.contexts) { context in
+                    ForEach(store.unarchivedContexts) { context in
                         ContextTab(store: store, contextID: context.id)
                     }
 
@@ -468,6 +521,24 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
                     .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
                     .help("新建目标")
+
+                    if !store.archivedContexts.isEmpty {
+                        Menu {
+                            ForEach(store.archivedContexts) { context in
+                                Button {
+                                    store.restore(context.id)
+                                } label: {
+                                    Label(context.title, systemImage: "arrow.uturn.backward")
+                                }
+                            }
+                        } label: {
+                            Label("\(store.archivedContexts.count)", systemImage: "archivebox")
+                                .frame(height: 28)
+                        }
+                        .menuStyle(.borderlessButton)
+                        .fixedSize()
+                        .help("恢复已归档目标")
+                    }
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
@@ -477,7 +548,7 @@ struct ContentView: View {
             if !isCollapsed {
                 Divider()
 
-                if store.contexts.isEmpty {
+                if store.unarchivedContexts.isEmpty {
                     VStack(spacing: 14) {
                         Image(systemName: "square.stack.3d.up.slash")
                             .font(.system(size: 36))
@@ -496,7 +567,7 @@ struct ContentView: View {
                     .padding(40)
                 } else if let activeContextID = store.activeContextID {
                     ContextPage(store: store, contextID: activeContextID)
-                } else if let firstContextID = store.contexts.first?.id {
+                } else if let firstContextID = store.unarchivedContexts.first?.id {
                     ContextPage(store: store, contextID: firstContextID)
                 }
 

@@ -4,7 +4,7 @@ set -euo pipefail
 
 ROOT_DIR="${0:A:h:h}"
 APP_NAME="Relay"
-VERSION="0.1.0"
+VERSION="0.1.1"
 BUILD_DIR="$ROOT_DIR/build"
 DIST_DIR="$ROOT_DIR/dist"
 APP_DIR="$DIST_DIR/$APP_NAME.app"
