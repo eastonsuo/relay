@@ -671,15 +671,102 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        window.title = "Relay — 人类上下文切换器"
+        window.title = "Relay · 人类上下文切换器"
+        window.titleVisibility = .visible
+        window.titlebarAppearsTransparent = true
         window.level = .floating
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        window.setContentSize(NSSize(width: 400, height: 330))
-        window.minSize = NSSize(width: 340, height: 280)
+        window.setContentSize(NSSize(width: 400, height: 310))
+        window.minSize = NSSize(width: 340, height: 260)
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
+}
+
+final class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+}
+
+struct FirstMouseHostingContainer<Content: View>: NSViewRepresentable {
+    let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    func makeNSView(context: Context) -> FirstMouseHostingView<Content> {
+        FirstMouseHostingView(rootView: content)
+    }
+
+    func updateNSView(_ nsView: FirstMouseHostingView<Content>, context: Context) {
+        nsView.rootView = content
+    }
+}
+
+final class InstantNSTextField: NSTextField {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if let window, !window.isKeyWindow {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        window?.makeFirstResponder(self)
+        super.mouseDown(with: event)
+    }
+}
+
+struct InstantTextField: NSViewRepresentable {
+    @Binding var text: String
+    let placeholder: String
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        var text: Binding<String>
+
+        init(text: Binding<String>) {
+            self.text = text
+        }
+
+        func controlTextDidChange(_ notification: Notification) {
+            guard let field = notification.object as? NSTextField else { return }
+            text.wrappedValue = field.stringValue
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text)
+    }
+
+    func makeNSView(context: Context) -> InstantNSTextField {
+        let field = InstantNSTextField()
+        field.delegate = context.coordinator
+        field.placeholderString = placeholder
+        field.isBordered = false
+        field.drawsBackground = false
+        field.focusRingType = .none
+        field.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        field.usesSingleLineMode = true
+        field.lineBreakMode = .byTruncatingTail
+        return field
+    }
+
+    func updateNSView(_ nsView: InstantNSTextField, context: Context) {
+        context.coordinator.text = $text
+        if nsView.stringValue != text {
+            nsView.stringValue = text
+        }
+        nsView.placeholderString = placeholder
+    }
+}
+
+enum RelayTheme {
+    static let mint = Color(red: 0.19, green: 0.76, blue: 0.55)
+    static let sky = Color(red: 0.30, green: 0.62, blue: 0.96)
 }
 
 struct LabeledEditor: View {
@@ -728,15 +815,14 @@ struct LabeledField: View {
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
 
-            TextField(placeholder, text: $text)
-                .textFieldStyle(.plain)
-                .font(.callout)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 7)
-                .background(.background.opacity(0.7), in: RoundedRectangle(cornerRadius: 8))
+            InstantTextField(text: $text, placeholder: placeholder)
+                .frame(height: 18)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(.background.opacity(0.82), in: RoundedRectangle(cornerRadius: 11))
                 .overlay {
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(.separator.opacity(0.5), lineWidth: 1)
+                    RoundedRectangle(cornerRadius: 11)
+                        .stroke(RelayTheme.sky.opacity(0.18), lineWidth: 1)
                 }
         }
     }
@@ -850,18 +936,17 @@ struct AddressSelector: View {
                     }
                 }
 
-                TextField(
-                    "补充备注（可选）",
-                    text: store.binding(for: contextID, keyPath: \.workspace.note, fallback: "")
+                InstantTextField(
+                    text: store.binding(for: contextID, keyPath: \.workspace.note, fallback: ""),
+                    placeholder: "补充备注（可选）"
                 )
-                .textFieldStyle(.plain)
-                .font(.callout)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 7)
-                .background(.background.opacity(0.7), in: RoundedRectangle(cornerRadius: 8))
+                .frame(height: 18)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(.background.opacity(0.82), in: RoundedRectangle(cornerRadius: 11))
                 .overlay {
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(.separator.opacity(0.5), lineWidth: 1)
+                    RoundedRectangle(cornerRadius: 11)
+                        .stroke(RelayTheme.sky.opacity(0.18), lineWidth: 1)
                 }
             }
         }
@@ -890,7 +975,7 @@ struct ContextTab: View {
             } label: {
                 HStack(spacing: 7) {
                     Circle()
-                        .fill(isActive ? Color.green : Color.secondary.opacity(0.45))
+                        .fill(isActive ? RelayTheme.mint : Color.secondary.opacity(0.35))
                         .frame(width: 7, height: 7)
                     Text(context.focus.isEmpty ? "未命名上下文" : context.focus)
                         .font(.subheadline.weight(isActive ? .semibold : .regular))
@@ -900,9 +985,15 @@ struct ContextTab: View {
                 .padding(.vertical, 7)
                 .foregroundStyle(isActive ? Color.primary : Color.secondary)
                 .background(
-                    isActive ? Color(nsColor: .controlBackgroundColor) : Color.clear,
-                    in: RoundedRectangle(cornerRadius: 8)
+                    isActive ? RelayTheme.mint.opacity(0.14) : Color.clear,
+                    in: RoundedRectangle(cornerRadius: 10)
                 )
+                .overlay {
+                    if isActive {
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(RelayTheme.mint.opacity(0.28), lineWidth: 1)
+                    }
+                }
             }
             .buttonStyle(.plain)
             .help("点击切换；右键归档或删除")
@@ -960,18 +1051,17 @@ struct ContextPage: View {
 
                         ForEach(context.details) { detail in
                             HStack(spacing: 6) {
-                                TextField(
-                                    "下一步、线索或待处理事项",
-                                    text: store.detailBinding(for: contextID, detailID: detail.id)
+                                InstantTextField(
+                                    text: store.detailBinding(for: contextID, detailID: detail.id),
+                                    placeholder: "下一步、线索或待处理事项"
                                 )
-                                .textFieldStyle(.plain)
-                                .font(.callout)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 7)
-                                .background(.background.opacity(0.7), in: RoundedRectangle(cornerRadius: 8))
+                                .frame(height: 18)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 8)
+                                .background(.background.opacity(0.82), in: RoundedRectangle(cornerRadius: 11))
                                 .overlay {
-                                    RoundedRectangle(cornerRadius: 8)
-                                        .stroke(.separator.opacity(0.5), lineWidth: 1)
+                                    RoundedRectangle(cornerRadius: 11)
+                                        .stroke(RelayTheme.sky.opacity(0.18), lineWidth: 1)
                                 }
 
                                 Button {
@@ -1013,6 +1103,13 @@ struct ContextPage: View {
                     }
                 }
                 .padding(14)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 16)
+                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                }
+                .shadow(color: RelayTheme.sky.opacity(0.08), radius: 8, y: 3)
+                .padding(8)
             }
             .confirmationDialog("删除“\(context.focus)”？", isPresented: $showingDeleteConfirmation) {
                 Button("删除", role: .destructive) {
@@ -1037,23 +1134,48 @@ struct ContentView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 7) {
-                Image(systemName: "arrow.trianglehead.2.clockwise.rotate.90")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.tint)
+            HStack(spacing: 8) {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 5) {
+                        ForEach(store.unarchivedContexts) { context in
+                            ContextTab(store: store, contextID: context.id)
+                        }
 
-                Text("Relay")
-                    .font(.subheadline.weight(.bold))
+                        Button {
+                            store.addContext()
+                        } label: {
+                            Image(systemName: "plus")
+                                .frame(width: 28, height: 28)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(RelayTheme.sky)
+                        .background(RelayTheme.sky.opacity(0.12), in: RoundedRectangle(cornerRadius: 9))
+                        .help("新建目标")
 
-                Text("· 人类上下文切换器")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                Spacer()
+                        if !store.archivedContexts.isEmpty {
+                            Menu {
+                                ForEach(store.archivedContexts) { context in
+                                    Button {
+                                        store.restore(context.id)
+                                    } label: {
+                                        Label(context.focus, systemImage: "arrow.uturn.backward")
+                                    }
+                                }
+                            } label: {
+                                Label("\(store.archivedContexts.count)", systemImage: "archivebox")
+                                    .frame(height: 28)
+                            }
+                            .menuStyle(.borderlessButton)
+                            .fixedSize()
+                            .help("恢复已归档目标")
+                        }
+                    }
+                }
 
                 Label("\(activeCount)", systemImage: "square.stack.3d.up")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .fixedSize()
 
                 Button {
                     setCollapsed(!isCollapsed)
@@ -1066,51 +1188,9 @@ struct ContentView: View {
                 .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
                 .help(isCollapsed ? "展开窗口" : "收起窗口")
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 7)
-            .background(.ultraThinMaterial)
-
-            Divider()
-
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 5) {
-                    ForEach(store.unarchivedContexts) { context in
-                        ContextTab(store: store, contextID: context.id)
-                    }
-
-                    Button {
-                        store.addContext()
-                    } label: {
-                        Image(systemName: "plus")
-                            .frame(width: 28, height: 28)
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
-                    .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
-                    .help("新建目标")
-
-                    if !store.archivedContexts.isEmpty {
-                        Menu {
-                            ForEach(store.archivedContexts) { context in
-                                Button {
-                                    store.restore(context.id)
-                                } label: {
-                                    Label(context.focus, systemImage: "arrow.uturn.backward")
-                                }
-                            }
-                        } label: {
-                            Label("\(store.archivedContexts.count)", systemImage: "archivebox")
-                                .frame(height: 28)
-                        }
-                        .menuStyle(.borderlessButton)
-                        .fixedSize()
-                        .help("恢复已归档目标")
-                    }
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-            }
-            .background(Color(nsColor: .windowBackgroundColor))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(RelayTheme.sky.opacity(0.035))
 
             if !isCollapsed {
                 Divider()
@@ -1151,14 +1231,21 @@ struct ContentView: View {
                 }
                 .padding(.horizontal, 18)
                 .padding(.vertical, 7)
-                .background(.ultraThinMaterial)
+                .background(RelayTheme.mint.opacity(0.06))
             }
         }
         .frame(
             minWidth: 340,
             idealWidth: 400,
-            minHeight: isCollapsed ? 70 : 280,
-            idealHeight: isCollapsed ? 70 : 330
+            minHeight: isCollapsed ? 44 : 260,
+            idealHeight: isCollapsed ? 44 : 310
+        )
+        .background(
+            LinearGradient(
+                colors: [RelayTheme.sky.opacity(0.045), RelayTheme.mint.opacity(0.035)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
         )
     }
 
@@ -1169,8 +1256,8 @@ struct ContentView: View {
 
         DispatchQueue.main.async {
             guard let window = NSApp.keyWindow ?? NSApp.windows.first else { return }
-            let targetHeight: CGFloat = collapsed ? 70 : 330
-            window.minSize = NSSize(width: 340, height: collapsed ? 70 : 280)
+            let targetHeight: CGFloat = collapsed ? 44 : 310
+            window.minSize = NSSize(width: 340, height: collapsed ? 44 : 260)
             window.setContentSize(NSSize(width: max(window.frame.width, 400), height: targetHeight))
         }
     }
@@ -1182,9 +1269,10 @@ struct RelayApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            FirstMouseHostingContainer {
+                ContentView()
+            }
         }
-        .windowStyle(.hiddenTitleBar)
         .commands {
             CommandGroup(replacing: .newItem) {}
         }
